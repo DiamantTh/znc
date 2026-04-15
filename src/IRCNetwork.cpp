@@ -535,7 +535,7 @@ bool CIRCNetwork::ParseConfig(CConfig* pConfig, CString& sError,
     pConfig->FindSubConfig("chan", subConf);
     for (subIt = subConf.begin(); subIt != subConf.end(); ++subIt) {
         const CString& sChanName = subIt->first;
-        CConfig* pSubConf = subIt->second.m_pSubConfig;
+        CConfig* pSubConf = subIt->second.m_pSubConfig.get();
         CChan* pChan = new CChan(sChanName, this, true, pSubConf);
 
         if (!pSubConf->empty()) {

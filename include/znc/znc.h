@@ -23,9 +23,11 @@
 #include <znc/Socket.h>
 #include <znc/Listener.h>
 #include <znc/Translation.h>
+#include <znc/IConfigProvider.h>
 #include <mutex>
 #include <map>
 #include <list>
+#include <memory>
 
 class CListener;
 class CUser;
@@ -131,6 +133,16 @@ class CZNC : private CCoreTranslationMixin {
     bool SetSSLProtocols(const CString& sProtocols);
     void SetSSLCertFile(const CString& sFile) { m_sSSLCertFile = sFile; }
     void SetConfigWriteDelay(unsigned int i) { m_uiConfigWriteDelay = i; }
+    void SetSplitUserConfig(bool b) { m_bSplitUserConfig = b; }
+    /**
+     * Replace the active IConfigProvider.  Ownership is transferred.
+     * The default provider is a FileConfigProvider backed by the config file
+     * path passed to ParseConfig().  A module may call this during OnBoot()
+     * to redirect all subsequent Load/Save operations to a custom backend.
+     */
+    void SetConfigProvider(std::unique_ptr<IConfigProvider> pProvider) {
+        m_pConfigProvider = std::move(pProvider);
+    }
     // !Setters
 
     // Getters
@@ -178,6 +190,9 @@ class CZNC : private CCoreTranslationMixin {
     CString GetSSLCertFile() const { return m_sSSLCertFile; }
     static VCString GetAvailableSSLProtocols();
     unsigned int GetConfigWriteDelay() const { return m_uiConfigWriteDelay; }
+    bool GetSplitUserConfig() const { return m_bSplitUserConfig; }
+    /** Return the currently active config provider (never null after ParseConfig). */
+    IConfigProvider* GetConfigProvider() const { return m_pConfigProvider.get(); }
     // !Getters
 
     // Static allocator
@@ -312,7 +327,7 @@ class CZNC : private CCoreTranslationMixin {
     VCString m_vsMotd;
     SCString m_ssClientCapBlacklist;
     SCString m_ssServerCapBlacklist;
-    CFile* m_pLockFile;
+    std::unique_ptr<CFile> m_pLockFile;
     unsigned int m_uiConnectDelay;
     unsigned int m_uiAnonIPLimit;
     unsigned int m_uiMaxBufferSize;
@@ -330,6 +345,8 @@ class CZNC : private CCoreTranslationMixin {
     bool m_bAuthOnlyViaModule;
     CTranslationDomainRefHolder m_Translation;
     unsigned int m_uiConfigWriteDelay;
+    bool m_bSplitUserConfig;
+    std::unique_ptr<IConfigProvider> m_pConfigProvider;
     CConfigWriteTimer* m_pConfigTimer;
 };
 

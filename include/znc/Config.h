@@ -19,18 +19,21 @@
 
 #include <znc/zncconfig.h>
 #include <znc/ZNCString.h>
+#include <memory>
 
 class CFile;
 class CConfig;
 
 struct CConfigEntry {
-    CConfigEntry();
-    CConfigEntry(const CConfig& Config);
+    CConfigEntry() = default;
+    explicit CConfigEntry(const CConfig& Config);
     CConfigEntry(const CConfigEntry& other);
-    ~CConfigEntry();
+    CConfigEntry(CConfigEntry&&) = default;
+    ~CConfigEntry() = default;
     CConfigEntry& operator=(const CConfigEntry& other);
+    CConfigEntry& operator=(CConfigEntry&&) = default;
 
-    CConfig* m_pSubConfig;
+    std::unique_ptr<CConfig> m_pSubConfig;
 };
 
 class CConfig {

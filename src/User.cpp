@@ -336,7 +336,7 @@ bool CUser::ParseConfig(CConfig* pConfig, CString& sError) {
     }
     subIt = subConf.begin();
     if (subIt != subConf.end()) {
-        CConfig* pSubConf = subIt->second.m_pSubConfig;
+        CConfig* pSubConf = subIt->second.m_pSubConfig.get();
         CString sHash;
         CString sMethod;
         CString sSalt;
@@ -389,7 +389,7 @@ bool CUser::ParseConfig(CConfig* pConfig, CString& sError) {
             pNetwork = new CIRCNetwork(this, sNetworkName);
         }
 
-        if (!pNetwork->ParseConfig(subIt->second.m_pSubConfig, sError)) {
+        if (!pNetwork->ParseConfig(subIt->second.m_pSubConfig.get(), sError)) {
             return false;
         }
     }

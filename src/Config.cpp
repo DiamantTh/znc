@@ -18,6 +18,7 @@
 #include <znc/FileUtils.h>
 #include <stack>
 #include <sstream>
+#include <memory>
 
 struct ConfigStackEntry {
     CString sTag;
@@ -28,23 +29,20 @@ struct ConfigStackEntry {
         : sTag(Tag), sName(Name), Config() {}
 };
 
-CConfigEntry::CConfigEntry() : m_pSubConfig(nullptr) {}
-
 CConfigEntry::CConfigEntry(const CConfig& Config)
-    : m_pSubConfig(new CConfig(Config)) {}
+    : m_pSubConfig(std::make_unique<CConfig>(Config)) {}
 
-CConfigEntry::CConfigEntry(const CConfigEntry& other) : m_pSubConfig(nullptr) {
-    if (other.m_pSubConfig) m_pSubConfig = new CConfig(*other.m_pSubConfig);
+CConfigEntry::CConfigEntry(const CConfigEntry& other) {
+    if (other.m_pSubConfig)
+        m_pSubConfig = std::make_unique<CConfig>(*other.m_pSubConfig);
 }
 
-CConfigEntry::~CConfigEntry() { delete m_pSubConfig; }
-
 CConfigEntry& CConfigEntry::operator=(const CConfigEntry& other) {
-    delete m_pSubConfig;
-    if (other.m_pSubConfig)
-        m_pSubConfig = new CConfig(*other.m_pSubConfig);
-    else
-        m_pSubConfig = nullptr;
+    if (this != &other) {
+        m_pSubConfig.reset();
+        if (other.m_pSubConfig)
+            m_pSubConfig = std::make_unique<CConfig>(*other.m_pSubConfig);
+    }
     return *this;
 }
 
@@ -55,6 +53,15 @@ bool CConfig::Parse(CFile& file, CString& sErrorMsg) {
     std::stack<ConfigStackEntry> ConfigStack;
     bool bCommented = false;  // support for /**/ style comments
 
+    // Inline error helper: sets sErrorMsg, clears state, returns false.
+    auto Error = [&](const CString& sMsg) -> bool {
+        sErrorMsg = "Error on line " + CString(uLineNum) + ": " + sMsg;
+        m_SubConfigNameSets.clear();
+        m_SubConfigs.clear();
+        m_ConfigEntries.clear();
+        return false;
+    };
+
     if (!file.Seek(0)) {
         sErrorMsg = "Could not seek to the beginning of the config.";
         return false;
@@ -62,17 +69,6 @@ bool CConfig::Parse(CFile& file, CString& sErrorMsg) {
 
     while (file.ReadLine(sLine)) {
         uLineNum++;
-
-#define ERROR(arg)                                             \
-    do {                                                       \
-        std::stringstream stream;                              \
-        stream << "Error on line " << uLineNum << ": " << arg; \
-        sErrorMsg = stream.str();                              \
-        m_SubConfigNameSets.clear();                           \
-        m_SubConfigs.clear();                                  \
-        m_ConfigEntries.clear();                               \
-        return false;                                          \
-    } while (0)
 
         // Remove all leading spaces and trailing line endings
         sLine.TrimLeft();
@@ -103,17 +99,19 @@ bool CConfig::Parse(CFile& file, CString& sErrorMsg) {
 
             if (sTag.TrimPrefix("/")) {
                 if (!sValue.empty())
-                    ERROR("Malformated closing tag. Expected \"</" << sTag
-                                                                   << ">\".");
+                    return Error("Malformated closing tag. Expected \"</" +
+                                 sTag + ">\".");
                 if (ConfigStack.empty())
-                    ERROR("Closing tag \"" << sTag << "\" which is not open.");
+                    return Error("Closing tag \"" + sTag +
+                                 "\" which is not open.");
 
                 const struct ConfigStackEntry& entry = ConfigStack.top();
                 CConfig myConfig(entry.Config);
                 CString sName(entry.sName);
 
                 if (!sTag.Equals(entry.sTag))
-                    ERROR("Closing tag \"" << sTag << "\" which is not open.");
+                    return Error("Closing tag \"" + sTag +
+                                 "\" which is not open.");
 
                 // This breaks entry
                 ConfigStack.pop();
@@ -127,15 +125,15 @@ bool CConfig::Parse(CFile& file, CString& sErrorMsg) {
                 auto& nameset = pActiveConfig->m_SubConfigNameSets[sTagLower];
 
                 if (nameset.find(sName) != nameset.end())
-                    ERROR("Duplicate entry for tag \"" << sTag << "\" name \""
-                                                       << sName << "\".");
+                    return Error("Duplicate entry for tag \"" + sTag +
+                                 "\" name \"" + sName + "\".");
 
                 nameset.insert(sName);
                 pActiveConfig->m_SubConfigs[sTagLower].emplace_back(sName,
                                                                     myConfig);
             } else {
                 if (sValue.empty())
-                    ERROR("Empty block name at begin of block.");
+                    return Error("Empty block name at begin of block.");
                 ConfigStack.push(ConfigStackEntry(sTag.AsLower(), sValue));
                 pActiveConfig = &ConfigStack.top().Config;
             }
@@ -155,20 +153,53 @@ bool CConfig::Parse(CFile& file, CString& sErrorMsg) {
         // leading/trailing spaces.
         sName.Trim();
 
-        if (sName.empty() || sValue.empty()) ERROR("Malformed line");
+        if (sName.empty() || sValue.empty()) return Error("Malformed line");
 
+        // Handle the "Include = <path>" directive: recursively parse the
+        // referenced file and merge its key-value pairs and subconfigs into
+        // the current configuration level.  Relative paths are resolved
+        // relative to the directory that contains the file being parsed.
         CString sNameLower = sName.AsLower();
+        if (sNameLower == "include") {
+            CString sIncludePath = sValue;
+            if (!sIncludePath.empty() && sIncludePath[0] != '/') {
+                // Resolve relative to the directory of the current file.
+                CString sDir = CDir::ChangeDir(file.GetLongName(), "..");
+                sIncludePath = sDir + "/" + sIncludePath;
+            }
+            CFile includeFile(sIncludePath);
+            if (!includeFile.Open(O_RDONLY)) {
+                sErrorMsg = "Error on line " + CString(uLineNum) +
+                            ": Cannot open included file \"" + sIncludePath +
+                            "\"";
+                m_SubConfigNameSets.clear();
+                m_SubConfigs.clear();
+                m_ConfigEntries.clear();
+                return false;
+            }
+            CString sIncludeError;
+            if (!pActiveConfig->Parse(includeFile, sIncludeError)) {
+                sErrorMsg = "In included file \"" + sIncludePath +
+                            "\": " + sIncludeError;
+                m_SubConfigNameSets.clear();
+                m_SubConfigs.clear();
+                m_ConfigEntries.clear();
+                return false;
+            }
+            continue;
+        }
+
         pActiveConfig->m_ConfigEntries[sNameLower].push_back(sValue);
     }
 
-    if (bCommented) ERROR("Comment not closed at end of file.");
+    if (bCommented) return Error("Comment not closed at end of file.");
 
     if (!ConfigStack.empty()) {
         const CString& sTag = ConfigStack.top().sTag;
-        ERROR(
+        return Error(
             "Not all tags are closed at the end of the file. Inner-most open "
-            "tag is \""
-            << sTag << "\".");
+            "tag is \"" +
+            sTag + "\".");
     }
 
     return true;

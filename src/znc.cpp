@@ -76,6 +76,7 @@ CZNC::CZNC()
       m_bAuthOnlyViaModule(false),
       m_Translation("znc"),
       m_uiConfigWriteDelay(0),
+      m_bSplitUserConfig(false),
       m_pConfigTimer(nullptr) {
     if (!InitCsocket()) {
         CUtils::PrintError("Could not initialize Csocket!");
@@ -110,7 +111,7 @@ CZNC::~CZNC() {
     DeleteUsers();
 
     delete m_pModules;
-    delete m_pLockFile;
+    // m_pLockFile is a unique_ptr, no explicit delete needed.
 
     ShutdownCsocket();
     DeletePidFile();
@@ -452,12 +453,11 @@ bool CZNC::WriteConfig() {
     }
 
     // We first write to a temporary file and then move it to the right place
-    CFile* pFile = new CFile(GetConfigFile() + "~");
+    auto pFile = std::make_unique<CFile>(GetConfigFile() + "~");
 
     if (!pFile->Open(O_WRONLY | O_CREAT | O_TRUNC, 0600)) {
         DEBUG("Could not write config to " + GetConfigFile() + "~: " +
               CString(strerror(errno)));
-        delete pFile;
         return false;
     }
 
@@ -468,7 +468,6 @@ bool CZNC::WriteConfig() {
         DEBUG("Error while locking the new config file, errno says: " +
               CString(strerror(errno)));
         pFile->Delete();
-        delete pFile;
         return false;
     }
 
@@ -486,6 +485,9 @@ bool CZNC::WriteConfig() {
     config.AddKeyValuePair("AuthOnlyViaModule", CString(m_bAuthOnlyViaModule));
     config.AddKeyValuePair("Version", CString(VERSION_STR));
     config.AddKeyValuePair("ConfigWriteDelay", CString(m_uiConfigWriteDelay));
+    if (m_bSplitUserConfig) {
+        config.AddKeyValuePair("SplitUserConfig", CString(m_bSplitUserConfig));
+    }
 
     unsigned int l = 0;
     for (CListener* pListener : m_vpListeners) {
@@ -545,17 +547,49 @@ bool CZNC::WriteConfig() {
         config.AddKeyValuePair("LoadModule", sName.FirstLine() + sArgs);
     }
 
-    for (const auto& it : m_msUsers) {
-        CString sErr;
-
-        if (!it.second->IsValid(sErr)) {
-            DEBUG("** Error writing config for user [" << it.first << "] ["
-                                                       << sErr << "]");
-            continue;
+    if (m_bSplitUserConfig) {
+        // Write each user to its own file and emit an Include directive.
+        CString sUsersDir =
+            CDir::ChangeDir(GetConfigFile(), "../users");
+        if (!CFile::Exists(sUsersDir)) {
+            CDir::MakeDir(sUsersDir, 0700);
         }
-
-        config.AddSubConfig("User", it.second->GetUsername(),
-                            it.second->ToConfig());
+        for (const auto& it : m_msUsers) {
+            CString sErr;
+            if (!it.second->IsValid(sErr)) {
+                DEBUG("** Error writing config for user [" << it.first << "] ["
+                                                           << sErr << "]");
+                continue;
+            }
+            CString sUserFile =
+                sUsersDir + "/" + it.second->GetUsername() + ".conf";
+            CFile userFile(sUserFile + "~");
+            if (userFile.Open(O_WRONLY | O_CREAT | O_TRUNC, 0600)) {
+                CConfig userConfig;
+                userConfig.AddSubConfig("User", it.second->GetUsername(),
+                                        it.second->ToConfig());
+                userConfig.Write(userFile);
+                userFile.Sync();
+                if (!userFile.HadError()) {
+                    userFile.Move(sUserFile, true);
+                }
+            }
+            config.AddKeyValuePair("Include",
+                                   "users/" + it.second->GetUsername() +
+                                       ".conf");
+        }
+    } else {
+        for (const auto& it : m_msUsers) {
+            CString sErr;
+            if (!it.second->IsValid(sErr)) {
+                DEBUG("** Error writing config for user [" << it.first
+                                                           << "] [" << sErr
+                                                           << "]");
+                continue;
+            }
+            config.AddSubConfig("User", it.second->GetUsername(),
+                                it.second->ToConfig());
+        }
     }
 
     config.Write(*pFile);
@@ -567,7 +601,6 @@ bool CZNC::WriteConfig() {
         DEBUG("Error while writing the config, errno says: " +
               CString(strerror(errno)));
         pFile->Delete();
-        delete pFile;
         return false;
     }
 
@@ -578,7 +611,6 @@ bool CZNC::WriteConfig() {
             "says "
             << strerror(errno));
         pFile->Delete();
-        delete pFile;
         return false;
     }
 
@@ -586,8 +618,7 @@ bool CZNC::WriteConfig() {
     pFile->SetFileName(GetConfigFile());
 
     // Make sure the lock is kept alive as long as we need it.
-    delete m_pLockFile;
-    m_pLockFile = pFile;
+    m_pLockFile = std::move(pFile);
 
     return true;
 }
@@ -1022,28 +1053,25 @@ bool CZNC::ReadConfig(CConfig& config, CString& sError) {
         return false;
     }
 
-    CFile* pFile = new CFile(m_sConfigFile);
+    auto pFile = std::make_unique<CFile>(m_sConfigFile);
 
     // need to open the config file Read/Write for fcntl()
     // exclusive locking to work properly!
     if (!pFile->Open(m_sConfigFile, O_RDWR)) {
         sError = "Can not open config file";
         CUtils::PrintStatus(false, sError);
-        delete pFile;
         return false;
     }
 
     if (!pFile->TryExLock()) {
         sError = "ZNC is already running on this config.";
         CUtils::PrintStatus(false, sError);
-        delete pFile;
         return false;
     }
 
     // (re)open the config file
-    delete m_pLockFile;
-    m_pLockFile = pFile;
-    CFile& File = *pFile;
+    m_pLockFile = std::move(pFile);
+    CFile& File = *m_pLockFile;
 
     if (!config.Parse(File, sError)) {
         CUtils::PrintStatus(false, sError);
@@ -1244,6 +1272,8 @@ bool CZNC::LoadGlobal(CConfig& config, CString& sError) {
     }
     if (config.FindStringEntry("configwritedelay", sVal))
         m_uiConfigWriteDelay = sVal.ToUInt();
+    if (config.FindStringEntry("splituserconfig", sVal))
+        m_bSplitUserConfig = sVal.ToBool();
 
     UnloadRemovedModules(msModules);
 
@@ -1262,7 +1292,7 @@ bool CZNC::LoadUsers(CConfig& config, CString& sError) {
 
     for (const auto& subIt : subConf) {
         const CString& sUsername = subIt.first;
-        CConfig* pSubConf = subIt.second.m_pSubConfig;
+        CConfig* pSubConf = subIt.second.m_pSubConfig.get();
 
         CUtils::PrintMessage("Loading user [" + sUsername + "]");
 
@@ -1339,7 +1369,7 @@ bool CZNC::LoadListeners(CConfig& config, CString& sError) {
     config.FindSubConfig("listener", subConf);
 
     for (const auto& subIt : subConf) {
-        CConfig* pSubConf = subIt.second.m_pSubConfig;
+        CConfig* pSubConf = subIt.second.m_pSubConfig.get();
         if (!AddListener(pSubConf, sError)) return false;
         if (!pSubConf->empty()) {
             sError = "Unhandled lines in Listener config!";
@@ -1395,7 +1425,7 @@ void CZNC::DumpConfig(const CConfig* pConfig) {
 
         for (; it != sSub.end(); ++it) {
             CUtils::PrintError("SubConfig [" + sKey + " " + it->first + "]:");
-            DumpConfig(it->second.m_pSubConfig);
+            DumpConfig(it->second.m_pSubConfig.get());
         }
     }
 }
