@@ -99,7 +99,7 @@ bool CConfig::Parse(CFile& file, CString& sErrorMsg) {
 
             if (sTag.TrimPrefix("/")) {
                 if (!sValue.empty())
-                    return Error("Malformated closing tag. Expected \"</" +
+                    return Error("Malformed closing tag. Expected \"</" +
                                  sTag + ">\".");
                 if (ConfigStack.empty())
                     return Error("Closing tag \"" + sTag +
